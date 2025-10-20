@@ -41,7 +41,7 @@ class ModelWithExtraDeps(torch.nn.Module):
             )
         elif challenge==2:
             self.real_model = QuixerTimeSeriesPennyLane(
-                sim14_circuit_config=['RX', 'IsingYY', 'RX', 'IsingYY_counter'],
+                sim14_circuit_config=['RY', 'IsingXX', 'RY', 'IsingXX_counter'],
                 feature_projection_layer='Conv2d_GLU',
                 output_ff_layer='GLU',
                 n_qubits=8,
