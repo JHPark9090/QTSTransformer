@@ -77,12 +77,8 @@ def resolve_path(name="python_packages"):
 class ModelWithExtraDeps(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        # EXAMPLE OF USING torch_geometric
-        # YOU CAN MODIFY THIS TO USE THE PACKAGE YOU INSTALLED
         import sys
         sys.path.append(resolve_path())
-        #import torch_geometric
-        #print("Using torch_geometric version", torch_geometric.__version__)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         from QuixerTSModel_Pennylane2 import QuixerTimeSeriesPennyLane
         self.real_model = QuixerTimeSeriesPennyLane(
@@ -94,15 +90,11 @@ class ModelWithExtraDeps(torch.nn.Module):
             degree=3,
             n_ansatz_layers=2,
             feature_dim=129,
-            # output_dim=y.shape[1],
             output_dim=1,
             dropout=0.1,
             device=device
         )
         self.real_model.to(device).float()
-        #self.real_model = EEGNeX(
-        #    n_chans=129, n_outputs=1, sfreq=100, n_times=int(2 * 100)
-        #)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.real_model(x)
 
