@@ -45,7 +45,7 @@ class ModelWithExtraDeps(torch.nn.Module):
                 feature_projection_layer='Conv2d_GLU',
                 output_ff_layer='GLU',
                 n_qubits=8,
-                n_timesteps=400,
+                n_timesteps=200,
                 degree=3,
                 n_ansatz_layers=2,
                 feature_dim=129,
