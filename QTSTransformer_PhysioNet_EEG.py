@@ -11,7 +11,7 @@ from typing import Tuple
 import time
 
 # Import custom modules
-from QTSTransformer_v1_5 import QuantumTSTransformer
+from QTSTransformer_v2_5 import QuantumTSTransformer
 from Load_PhysioNet_EEG import load_eeg_ts_revised
 from logger import TrainingLogger
 

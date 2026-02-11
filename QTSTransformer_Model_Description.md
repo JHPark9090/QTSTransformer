@@ -1,46 +1,29 @@
-# Quantum Time-Series Transformer v1.5 (PennyLane Implementation)
+# Quantum Time-Series Transformer v2.5 (PennyLane Implementation)
 This repository contains a PyTorch and PennyLane implementation of a quantum time-series transformer model developed by Park et al. (2025). The quantum time-series transformer is based on the Quixer model architecture proposed by Khatri et al. (2024). This model is designed to process time-series data by leveraging quantum computing principles for embedding, mixing, and non-linear transformation of temporal features.
 
-## v1.5 Improvements over v1
+v2.5 uses the classical simulation approach described in Khatri et al. Section 4.1, where the LCU and QSVT are computed via direct statevector manipulation rather than actual quantum circuits with ancilla registers.
+
+## v2.5 Improvements over v1
 1. **Sinusoidal Positional Encoding** (Vaswani et al., 2017) added to the input sequence
-2. **2π angle scaling**: `sigmoid * 2π` for full `[0, 2π]` rotation range (v1 used sigmoid alone)
-3. **Single coherent QNode**: The entire QSVT + QFF + measurement pipeline runs in one quantum circuit (v1 used multiple separate QNodes with classical state-vector manipulation in between)
-4. **Genuine quantum LCU**: Uses `qml.Select` and a learnable PREPARE unitary on an ancilla register (v1 simulated LCU classically via `torch.einsum`)
-5. **Genuine quantum QSVT**: Uses `qml.PCPhase` signal-processing angles with alternating SELECT/SELECT† blocks (v1 simulated QSVT via classical polynomial accumulation)
-6. **SELECT operator caching**: `build_select_ops()` is called once per forward pass and reused across QSVT degree iterations
+2. **2π angle scaling**: `sigmoid * 2π` for full `[0, 2π]` rotation range (v1 used sigmoid alone, limiting angles to `[0, 1]`)
 
 # Core Concepts
 The model's architecture can be broken down into four key stages:
 
 - **Unitary Temporal Embedding**: The feature vector at each point in a time sequence is mapped to a unique quantum circuit (a unitary matrix), creating a quantum representation of that specific moment's data.
 
-- **Time Sequence Mixing (LCU)**: A Linear Combination of Unitaries (LCU) encodes all time-step unitaries ($U_j$) into a single block-encoded operator using a quantum PREPARE-SELECT protocol on an ancilla register. This serves as a quantum-native attention-like mechanism to mix information across the time sequence.
+- **Time Sequence Mixing (LCU)**: A Linear Combination of Unitaries (LCU) combines all time-step unitaries ($U_j$) with learnable complex coefficients into a single mixed state. This is computed via classical simulation: each timestep unitary is applied to the working state via a QNode, and the results are combined with `torch.einsum`. This serves as an attention-like mechanism to mix information across the time sequence.
 
-$$M = \sum^{n-1}_{j=0} |\alpha_j|^2 U_j$$
+$$M|\psi\rangle = \sum^{n-1}_{j=0} b_j \, U_j|\psi\rangle$$
 
-- **Non-linearity (QSVT)**: Quantum Singular Value Transformation (QSVT) applies a non-linear polynomial transformation to the block-encoded operator $M$ via alternating signal-processing phase rotations (`PCPhase`) and LCU block-encoding steps. This allows the model to capture richer, higher-order interactions between different time-steps.
+- **Non-linearity (QSVT)**: The QSVT polynomial transformation is classically simulated by iteratively applying the LCU operator $M$ to the working state $d$ times (where $d$ is the polynomial degree), accumulating a weighted sum with learnable polynomial coefficients.
 
-$$P_d(M) \sim \prod_{k=0}^{d} \bigl[\text{PCPhase}(\varphi_k) \cdot \text{LCU-block}\bigr]$$
+$$P_d(M)|0\rangle = \sum_{k=0}^{d} c_k \, M^k |0\rangle$$
 
-- **Readout and Classical Processing**: The final quantum state is measured to extract classical features (Pauli expectation values). These features are then processed by a classical feed-forward neural network to produce the final prediction.
+- **Readout and Classical Processing**: The final quantum state is prepared via `StatePrep`, processed through a quantum feed-forward (QFF) circuit, and measured to extract Pauli expectation values. These features are then processed by a classical feed-forward neural network to produce the final prediction.
 
 # Code Implementation Breakdown
-This section explains how each conceptual step is realized in the QTSTransformer_v1_5.py code.
-
-## Qubit Layout
-
-The circuit uses two registers:
-
-- **Main register**: `n_qubits` wires for data processing
-- **Ancilla register**: `ceil(log2(n_timesteps))` wires for LCU SELECT control
-
-```
-# QuantumTSTransformer -> __init__()
-self.n_ancilla = ceil(log2(max(n_timesteps, 2)))
-self.main_wires = list(range(n_qubits))
-self.anc_wires = list(range(n_qubits, n_qubits + self.n_ancilla))
-self.total_wires = n_qubits + self.n_ancilla
-```
+This section explains how each conceptual step is realized in the QTSTransformer_v2_5.py code.
 
 ## 1) Unitary Temporal Embedding
 **Concept**: Classical features for each time-step are mapped to a unique Parameterized Quantum Circuit (PQC), which defines a unitary transformation.
@@ -51,7 +34,7 @@ This process involves three main parts:
 
 **1-1) Sinusoidal Positional Encoding (__init__ and forward methods)**
 
-Before projection, sinusoidal positional encoding (Vaswani et al., 2017) is added to inject temporal position information into the input.
+Before projection, sinusoidal positional encoding (Vaswani et al., 2017) is added to inject temporal position information into the input. Without positional encoding, the model would be order-agnostic and unable to distinguish timestep order.
 ```
 # QuantumTSTransformer -> __init__()
 pe = torch.zeros(n_timesteps, feature_dim)
@@ -72,137 +55,125 @@ x = x + self.pe[:, :x.size(1)]      # positional encoding
 The classical input feature vector for each time-step is passed through a `torch.nn.Linear` layer to generate rotation angles, then scaled to the full `[0, 2π]` range via `sigmoid * 2π`.
 ```
 # QuantumTSTransformer -> forward()
-x = self.feature_projection(self.dropout(x))  # (batch, T, n_rots)
-ts_params = self.rot_sigm(x) * (2 * math.pi)  # sigmoid -> [0, 2pi]
+x = self.feature_projection(self.dropout(x))       # (batch, T, n_rots)
+timestep_params = self.rot_sigm(x) * (2 * math.pi) # sigmoid -> [0, 2pi]
 ```
 - `self.feature_projection`: The learnable linear layer mapping `feature_dim → n_rots`.
-- `ts_params`: The resulting tensor holding the gate parameters for every time-step in the batch, with values in `[0, 2π]`.
+- `timestep_params`: The resulting tensor holding the gate parameters for every time-step in the batch, with values in `[0, 2π]`.
 
 **1-3) Quantum Circuit Definition (sim14_circuit function)**
 
-This function defines the fixed structure of the PQC, arranging RY and CRX gates. When parameterized by `ts_params`, it defines a unique unitary matrix $U_t$ for that time-step.
+This function defines the fixed structure of the PQC, arranging RY and CRX gates. When parameterized by `timestep_params`, it defines a unique unitary matrix $U_t$ for that time-step.
 ```
 def sim14_circuit(params, wires, layers=1):
     # Gate sequence per layer: RY -> CRX(ring) -> RY -> CRX(counter-ring)
     # Parameters per layer: 4 * wires
 ```
 
-**1-4) SELECT Operator Construction (_circuit → build_select_ops)**
-
-Each time-step's sim14 unitary is wrapped as a `qml.prod` operator and collected into a list for `qml.Select`. The list is padded to `2^n_ancilla` with Identity operators.
-```
-# _circuit -> build_select_ops()
-select_ops = []
-for t in range(_n_timesteps):
-    gates = []
-    # ... build sim14 gates for timestep t using ts_params[..., t, :] ...
-    select_ops.append(qml.prod(*reversed(gates)))
-# Pad to 2^n_ancilla with Identity
-while len(select_ops) < _n_select_ops:
-    select_ops.append(qml.Identity(wires=_main_wires[0]))
-return select_ops
-```
-This list is built **once** per forward pass and reused across all QSVT degree iterations.
-
-## 2) Time Sequence Mixing via LCU
-**Concept**: The model uses a quantum PREPARE-SELECT protocol to create a block-encoded superposition of all time-step unitaries on the main register, controlled by an ancilla register.
+## 2) Time Sequence Mixing via Classical LCU Simulation
+**Concept**: The model computes a linear combination of unitaries classically by applying each timestep unitary to the working state via a QNode and combining the results with learnable complex coefficients.
 
 ### Realization in the Code:
 
-**2-1) Learnable PREPARE Unitary (_circuit → prepare)**
+**2-1) Timestep State QNode (_timestep_state_qnode)**
 
-A trainable unitary $V$ is applied to the ancilla register, creating a superposition that determines the weighting of each time-step unitary in the LCU.
-```
-# _circuit -> prepare()
-def prepare():
-    for ly in range(_n_prep_layers):
-        for qi, q in enumerate(_anc_wires):
-            qml.RY(prep_p[ly, qi, 0], wires=q)
-            qml.RZ(prep_p[ly, qi, 1], wires=q)
-        for i in range(_n_ancilla - 1):
-            qml.CNOT(wires=[_anc_wires[i], _anc_wires[i + 1]])
-```
-- `self.prepare_params`: Trainable parameter tensor of shape `(n_prep_layers, n_ancilla, 2)` for RY and RZ rotations.
-
-**2-2) SELECT Application (_circuit)**
-
-`qml.Select` applies the $t$-th time-step unitary $U_t$ on the main register, conditioned on the ancilla register being in state $|t\rangle$. Combined with the PREPARE unitary, this realizes the LCU block encoding.
-```
-# _circuit
-qml.Select(select_ops, control=_anc_wires)
-```
-
-## 3) Non-linearity via QSVT
-
-**Concept**: A polynomial transformation $P_d(M)$ is applied to the block-encoded LCU operator $M$ through alternating signal-processing phase rotations (`PCPhase`) and LCU block-encoding steps (PREPARE → SELECT → PREPARE†). The signal-processing angles $\varphi_k$ are learnable parameters that determine the polynomial being applied.
-
-### Realization in the Code:
-
-**3-1) Trainable Signal-Processing Angles (__init__ method)**
-
-The QSVT signal-processing angles $(\varphi_0, \varphi_1, \ldots, \varphi_d)$ are defined as a learnable parameter.
+A QNode that prepares an initial state via `StatePrep`, applies the sim14 circuit, and returns the full statevector. This is called once per polynomial iteration with all batch*timestep combinations vectorized into a single call.
 ```
 # QuantumTSTransformer -> __init__()
-self.signal_angles = torch.nn.Parameter(
-    0.1 * torch.randn(degree + 1))
+@qml.qnode(self.dev, interface="torch", diff_method="backprop")
+def _timestep_state_qnode(initial_state, params):
+    qml.StatePrep(initial_state, wires=range(self.n_qubits))
+    sim14_circuit(params, wires=self.n_qubits, layers=self.n_ansatz_layers)
+    return qml.state()
 ```
 
-**3-2) QSVT Circuit (_circuit)**
+**2-2) Vectorized LCU Application (apply_unitaries_pl)**
 
-The main QSVT loop alternates between `PCPhase` rotations and LCU block-encoding steps (PREPARE → SELECT/SELECT† → PREPARE†). Even-indexed iterations use SELECT, odd-indexed use adjoint(SELECT).
+Instead of looping over timesteps, all batch*timestep states and parameters are flattened into a single large batch and processed in one QNode call. The LCU combination is then performed via `torch.einsum`.
 ```
-# _circuit
-select_ops = build_select_ops()  # build once, reuse
-
-qml.PCPhase(sig_ang[0], dim=_pcphase_dim, wires=_pcphase_wires)
-
-for k in range(_degree):
-    prepare()
-    if k % 2 == 0:
-        qml.Select(select_ops, control=_anc_wires)
-    else:
-        qml.adjoint(qml.Select)(select_ops, control=_anc_wires)
-    qml.adjoint(prepare)()
-    qml.PCPhase(sig_ang[k + 1], dim=_pcphase_dim,
-                wires=_pcphase_wires)
+# apply_unitaries_pl()
+flat_params = unitary_params.reshape(bsz * n_timesteps, n_rots)
+repeated_base_states = base_states.repeat_interleave(n_timesteps, dim=0)
+evolved_states = qnode_state(initial_state=repeated_base_states, params=flat_params)
+evolved_states_reshaped = evolved_states.reshape(bsz, n_timesteps, 2**n_qbs)
+lcs = torch.einsum('bti,bt->bi', evolved_states_reshaped, coeffs)
 ```
-- `PCPhase(φ, dim, wires)`: Applies a phase of $e^{i\varphi}$ to the first `dim` basis states and $e^{-i\varphi}$ to the rest, acting on the combined ancilla+main register.
-- The alternating SELECT / adjoint(SELECT) pattern is standard in QSVT constructions for block-encoded matrices.
+- `self.mix_coeffs`: Trainable complex-valued tensor of shape `(n_timesteps,)` — the LCU coefficients $b_j$.
 
-## 4) Readout and Classical Processing
-**Concept**: After the QSVT polynomial transformation, a final trainable quantum feed-forward (QFF) layer is applied to the main register, followed by Pauli expectation value measurements. These classical features are then processed by a feed-forward network.
+## 3) Non-linearity via Classical QSVT Simulation
+
+**Concept**: The QSVT polynomial $P_d(M) = \sum_{k=0}^{d} c_k M^k$ is computed by iteratively applying the LCU operator to the working state and accumulating a weighted sum with learnable polynomial coefficients.
 
 ### Realization in the Code:
 
-**4-1) QFF and Measurement (_circuit)**
+**3-1) Trainable Polynomial Coefficients (__init__ method)**
 
-Within the same coherent QNode, a final sim14 circuit is applied to the main register, followed by PauliX, PauliY, and PauliZ measurements on each main qubit.
+The polynomial coefficients $(c_0, c_1, \ldots, c_d)$ are defined as a learnable parameter.
 ```
-# _circuit
+# QuantumTSTransformer -> __init__()
+self.n_poly_coeffs = self.degree + 1
+self.poly_coeffs = torch.nn.Parameter(torch.rand(self.n_poly_coeffs))
+```
 
-# QFF on main register
-sim14_circuit(qff_p, wires=_n_qubits, layers=1)
+**3-2) Polynomial State Preparation (evaluate_polynomial_state_pl)**
 
-# Measure PauliX/Y/Z on main register
-observables = (
-    [qml.PauliX(i) for i in _main_wires] +
-    [qml.PauliY(i) for i in _main_wires] +
-    [qml.PauliZ(i) for i in _main_wires])
-return [qml.expval(op) for op in observables]
+The polynomial is evaluated by iteratively applying $M$ to the working register and accumulating the weighted sum. The result is normalized by the L1 norm of the polynomial coefficients.
+```
+# evaluate_polynomial_state_pl()
+acc = poly_coeffs[0] * base_states            # c_0 * |0>
+working_register = base_states
+for c in poly_coeffs[1:]:
+    working_register = apply_unitaries_pl(     # M^k |0>
+        working_register, unitary_params,
+        qnode_state, lcu_coeffs)
+    acc = acc + c * working_register           # + c_k * M^k |0>
+return acc / torch.linalg.vector_norm(poly_coeffs, ord=1)
+```
+- Each iteration applies $M$ once more: `working_register` progresses through $|0\rangle \to M|0\rangle \to M^2|0\rangle \to \cdots$
+- The final state is $P_d(M)|0\rangle / \|c\|_1$
+
+## 4) Readout and Classical Processing
+**Concept**: After the QSVT polynomial transformation, the resulting quantum state is prepared via `StatePrep`, processed through a quantum feed-forward (QFF) layer, and measured to extract Pauli expectation values. These classical features are then processed by a feed-forward network.
+
+### Realization in the Code:
+
+**4-1) State Normalization (forward method)**
+
+The polynomial output state is normalized before being passed to the QFF QNode.
+```
+# QuantumTSTransformer -> forward()
+norm = torch.linalg.vector_norm(mixed_timestep, dim=1, keepdim=True)
+normalized_mixed_timestep = mixed_timestep / (norm + 1e-9)
+```
+
+**4-2) QFF and Measurement (_qff_qnode_expval)**
+
+A separate QNode prepares the normalized state via `StatePrep`, applies a 1-layer sim14 circuit (QFF), and measures PauliX, PauliY, and PauliZ on each qubit.
+```
+# QuantumTSTransformer -> __init__()
+@qml.qnode(self.dev, interface="torch", diff_method="backprop")
+def _qff_qnode_expval(initial_state, params):
+    qml.StatePrep(initial_state, wires=range(self.n_qubits))
+    sim14_circuit(params, wires=self.n_qubits, layers=1)
+    observables = [qml.PauliX(i) for i in range(self.n_qubits)] + \
+                  [qml.PauliY(i) for i in range(self.n_qubits)] + \
+                  [qml.PauliZ(i) for i in range(self.n_qubits)]
+    return [qml.expval(op) for op in observables]
 ```
 - `self.qff_params`: Trainable parameters for the QFF sim14 circuit.
 - The measurement yields `3 * n_qubits` real-valued expectation values.
 
-**4-2) Classical Output Layer (forward method)**
+**4-3) Classical Output Layer (forward method)**
 
 The expectation values are stacked and passed through the final linear layer.
 ```
 # QuantumTSTransformer -> forward()
-exps = self._circuit(
-    ts_params, self.prepare_params,
-    self.signal_angles, self.qff_params)
+exps = self.qff_qnode_expval(
+    initial_state=normalized_mixed_timestep,
+    params=self.qff_params)
 exps = torch.stack(exps, dim=1).float()
-return self.output_ff(exps).squeeze(1)
+op = self.output_ff(exps)
+return op.squeeze(1)
 ```
 - `self.output_ff`: The final `torch.nn.Linear` layer that maps the `3 * n_qubits` measurement outcomes to the desired `output_dim`.
 

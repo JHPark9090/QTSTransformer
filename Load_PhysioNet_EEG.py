@@ -49,13 +49,17 @@ def load_eeg_ts_revised(seed, device, batch_size, sampling_freq, sample_size):
     # --- Step 2: Define a Helper Function to Load Data for a Given List of Subjects ---
     def _load_and_process_subjects(subject_list, sfreq):
         IMAGINE_OPEN_CLOSE_LEFT_RIGHT_FIST = [4, 8, 12]
-        
+
+        # Absolute path to PhysioNet EEG data (avoids interactive prompt in batch jobs)
+        DATA_PATH = "/pscratch/sd/j/junghoon/PhysioNet_EEG"
+
         # Load file paths for the specified subjects
         physionet_paths = [
             mne.datasets.eegbci.load_data(
                 subjects=subj_id,
                 runs=IMAGINE_OPEN_CLOSE_LEFT_RIGHT_FIST,
-                path="PhysioNet_EEG",
+                path=DATA_PATH,
+                update_path=False,  # Avoid interactive prompt
             ) for subj_id in subject_list
         ]
         physionet_paths = np.concatenate(physionet_paths)

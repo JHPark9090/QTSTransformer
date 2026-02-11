@@ -1,5 +1,5 @@
 #!/bin/bash
-# Simple script to run the Quantum Time-series Transformer v1.5 toy example
+# Simple script to run the Quantum Time-series Transformer v2.5 toy example
 # This can be run directly on a login node or submitted as a batch job
 
 # Activate the conda environment
@@ -8,8 +8,8 @@ eval "$(conda shell.bash hook 2>/dev/null)"
 conda activate /pscratch/sd/j/junghoon/conda-envs/qml_eeg
 
 # Run with default settings (8 qubits, 2 layers, degree 3)
-echo "Running Quantum Time-series Transformer v1.5 on PhysioNet EEG..."
-echo "Model: 8 qubits, 2 layers, degree 3 (QSVT via LCU)"
+echo "Running Quantum Time-series Transformer v2.5 on PhysioNet EEG..."
+echo "Model: 8 qubits, 2 layers, degree 3 (Classical LCU+QSVT simulation)"
 echo "Data: 50 subjects, sampling frequency 16 Hz"
 echo ""
 
